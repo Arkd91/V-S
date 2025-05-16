@@ -19,29 +19,23 @@ GPU_FULL=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -n1)
 GPU_MODEL=$(echo "$GPU_FULL" | grep -oP 'RTX\s*\K[0-9]+[a-zA-Z]*')
 PUBLIC_IP=$(curl -s https://api.ipify.org)
 
+# Get current date and hour in GMT-5 (Peru time)
+JOIN_DATE=$(TZ=America/Lima date +"%Y%m%d")
+JOIN_HOUR=$(TZ=America/Lima date +"%H%M")
+
+WORKER_NAME="${GPU_MODEL}-${PUBLIC_IP}-${JOIN_DATE}-${JOIN_HOUR}"
+
 # Write worker.py
-cat <<'EOPY' > worker.py
-import os
+cat <<EOPY > worker.py
 import requests
 import subprocess
 import time
 import threading
 import sys
-from datetime import datetime, timedelta, timezone
 
 SERVER_URL = "https://project-bitcoin-puzzle.fly.dev/"
-GPU_ID = os.getenv("GPU_ID", "0")
-gpu_model = os.getenv("WORKER_MODEL", "GPU")
-public_ip = os.getenv("WORKER_IP", "0.0.0.0")
-
-# Get current time in GMT-5 (no seconds)
-gmt_minus_5 = timezone(timedelta(hours=-5))
-timestamp = datetime.now(gmt_minus_5).strftime("%Y%m%d-%H%M")
-
-# Final worker name format: model-ip-datehourminute-gpuX
-WORKER_NAME = f"{gpu_model}-{public_ip}-{timestamp}-GPU{GPU_ID}"
-
-HEARTBEAT_INTERVAL = 30
+WORKER_NAME = "${WORKER_NAME}"
+HEARTBEAT_INTERVAL = 10
 VANITYSEARCH_CMD = "./vanitysearch"
 TARGET_ADDRESS = "1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU"
 RANGE_BITS = 40
@@ -53,7 +47,7 @@ match_found = False
 def send_heartbeat():
     while not stop_flag and not match_found:
         try:
-            requests.post(f"{SERVER_URL}/heartbeat", json={"worker": WORKER_NAME}, timeout=5)
+            requests.post(f"{SERVER_URL}/heartbeat", json={"worker": WORKER_NAME}, timeout=10)
         except Exception as e:
             print(f"[!] Heartbeat error: {e}")
         time.sleep(HEARTBEAT_INTERVAL)
@@ -85,11 +79,11 @@ def run_worker():
                 continue
 
             current_hex = data["hex"]
-            print(f"\n[+] Received work: {current_hex}")
+            print(f"\\n[+] Received work: {current_hex}")
 
             cmd = [
                 VANITYSEARCH_CMD,
-                "-gpuId", GPU_ID,
+                "-gpuId", "0",
                 "-start", current_hex,
                 "-range", str(RANGE_BITS),
                 TARGET_ADDRESS
@@ -101,7 +95,8 @@ def run_worker():
 
             for line in proc.stdout:
                 if "Setting starting keys..." in line or ("MK/s" in line and "RUN:" in line):
-                    print(f"[~] {line.strip()}")
+                    print(f"\\r{line.strip()} ", end='', flush=True)
+                    continue
                 else:
                     print(line, end='')
 
@@ -115,9 +110,10 @@ def run_worker():
             result = "found" if found else "done"
             requests.post(f"{SERVER_URL}/report-result", json={
                 "worker": WORKER_NAME,
-                "status": result
+                "status": result,
+                "hex": current_hex
             })
-            print(f"\n[+] Reported result: {result}")
+            print(f"\\n[+] Reported result: {result}")
 
             if result == "found":
                 match_found = True
@@ -135,23 +131,14 @@ if __name__ == "__main__":
         run_worker()
     except KeyboardInterrupt:
         stop_flag = True
-        print("\n[!] Stopped by user.")
+        print("\\n[!] Stopped by user.")
 EOPY
 
-# Detect GPU count
-NUM_GPUS=$(nvidia-smi -L | wc -l)
-echo "🖥️ Detected $NUM_GPUS GPU(s)"
-
-# Launch one screen per GPU
-for ((i=0; i<NUM_GPUS; i++)); do
-    echo "🚀 Launching worker on GPU $i"
-    screen -S "gpu$i" -dm bash -c "export GPU_ID=$i WORKER_MODEL=$GPU_MODEL WORKER_IP=$PUBLIC_IP && python3 worker.py"
-done
-
-# Auto-attach to GPU 0 screen
+# Run the worker inside a screen session and attach
+screen -S Mysession -dm python3 worker.py
 sleep 2
-screen -r gpu0
+screen -r Mysession
 EOF
 
-# Run the script
+# Execute the script
 chmod +x setup_and_run.sh && ./setup_and_run.sh
