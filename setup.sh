@@ -11,6 +11,7 @@ pip3 install requests
 git clone https://github.com/FixedPaul/VanitySearch-Bitcrack.git
 cd VanitySearch-Bitcrack
 make
+cd 'VanitySearch 2.2'
 cd 'Compiled-Ubuntu 22.04-Cuda12'
 chmod +x vanitysearch
 
@@ -19,9 +20,9 @@ GPU_FULL=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -n1)
 GPU_MODEL=$(echo "$GPU_FULL" | grep -oP 'RTX\s*\K[0-9]+[a-zA-Z]*')
 PUBLIC_IP=$(curl -s https://api.ipify.org)
 
-# Get current date and hour in GMT-5 (Peru time)
-JOIN_DATE=$(TZ=America/Lima date +"%Y%m%d")
-JOIN_HOUR=$(TZ=America/Lima date +"%H%M")
+# Get current date and hour in GMT-5 (Peru time) using manual offset
+JOIN_DATE=$(date -u -d '-5 hours' +"%Y%m%d")
+JOIN_HOUR=$(date -u -d '-5 hours' +"%H%M")
 
 WORKER_NAME="${GPU_MODEL}-${PUBLIC_IP}-${JOIN_DATE}-${JOIN_HOUR}"
 
