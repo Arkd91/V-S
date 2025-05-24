@@ -1,145 +1,157 @@
-cat <<'EOF' > setup_and_run.sh
-#!/bin/bash
-
-set -e
-
-# Install dependencies
-sudo apt update && sudo apt install -y g++-9 python3-pip screen nano
-pip3 install requests
-
-# Clone and build VanitySearch
-git clone https://github.com/FixedPaul/VanitySearch-Bitcrack.git
-cd VanitySearch-Bitcrack
-make
-cd 'VanitySearch 2.2'
-cd 'Compiled-Ubuntu 22.04-Cuda12'
-chmod +x vanitysearch
-
-# Get GPU model and IP
-GPU_FULL=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -n1)
-GPU_MODEL=$(echo "$GPU_FULL" | grep -oP 'RTX\s*\K[0-9]+[a-zA-Z]*')
-PUBLIC_IP=$(curl -s https://api.ipify.org)
-
-# Get current date and hour in GMT-5 (Peru time) using manual offset
-JOIN_DATE=$(date -u -d '-5 hours' +"%Y%m%d")
-JOIN_HOUR=$(date -u -d '-5 hours' +"%H%M")
-
-WORKER_NAME="${GPU_MODEL}-${PUBLIC_IP}-${JOIN_DATE}-${JOIN_HOUR}"
-
-# Write worker.py
-cat <<EOPY > worker.py
-import requests
-import subprocess
+from flask import Flask, request, jsonify
+import duckdb
 import time
 import threading
-import sys
+import requests
 
-SERVER_URL = "https://project-bitcoin-puzzle.fly.dev/"
-WORKER_NAME = "${WORKER_NAME}"
-HEARTBEAT_INTERVAL = 10
-VANITYSEARCH_CMD = "./vanitysearch"
-TARGET_ADDRESS = "1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU"
-RANGE_BITS = 40
+# === Telegram Bot Tokens and Chat IDs ===
+BOT_A_TOKEN = "7565815877:AAEN8dj3-cxBiWR1OCzQe8JvAMZvKMOKxzQ"
+BOT_A_CHAT_ID = "5719338492"
 
-current_hex = None
-stop_flag = False
-match_found = False
+BOT_B_TOKEN = "7418564051:AAFYhx6oDowNDBZZcmzwFx3PS-ecFfMql8Q"
+BOT_B_CHAT_ID = "5719338492"
 
-def send_heartbeat():
-    while not stop_flag and not match_found:
+# === Server setup ===
+app = Flask(__name__)
+DB_FILE = "/data/hex_ranges.duckdb"
+db_lock = threading.Lock()
+
+# === Internal state ===
+workers = {}  # {worker_id: {"last_seen": timestamp, "hex": current_range}}
+heartbeat_timeout = 180  # seconds
+
+# === Telegram with retry ===
+def send_telegram(bot_token, chat_id, message, retries=3):
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    for i in range(retries):
         try:
-            requests.post(f"{SERVER_URL}/heartbeat", json={"worker": WORKER_NAME}, timeout=10)
+            response = requests.post(url, data={"chat_id": chat_id, "text": message}, timeout=10)
+            if response.ok:
+                print(f"[Telegram] ✅ Sent: {message}")
+                return
+            else:
+                print(f"[Telegram] ❌ HTTP {response.status_code}: {response.text}")
         except Exception as e:
-            print(f"[!] Heartbeat error: {e}")
-        time.sleep(HEARTBEAT_INTERVAL)
+            print(f"[Telegram] ❌ Exception (attempt {i+1}): {e}")
+        time.sleep(1)
 
-def run_worker():
-    global current_hex, stop_flag, match_found
+# === Worker joins ===
+@app.route("/join", methods=["POST"])
+def join():
+    worker = request.json.get("worker")
+    if not worker:
+        return jsonify({"error": "Missing worker name"}), 400
 
-    try:
-        response = requests.post(f"{SERVER_URL}/join", json={"worker": WORKER_NAME})
-        print(response.json())
-    except Exception as e:
-        print(f"[!] Failed to join server: {e}")
-        sys.exit(1)
+    workers[worker] = {"last_seen": time.time(), "hex": None}
+    send_telegram(BOT_B_TOKEN, BOT_B_CHAT_ID, f"👋 {worker} joined.\nActive: {list(workers.keys())}\nTotal {len(workers)}")
+    return jsonify({"message": f"{worker} registered"})
 
-    threading.Thread(target=send_heartbeat, daemon=True).start()
+# === Request work ===
+@app.route("/request-work", methods=["POST"])
+def request_work():
+    worker = request.json.get("worker")
+    if not worker:
+        return jsonify({"error": "Missing worker name"}), 400
 
-    while not match_found:
-        try:
-            res = requests.post(f"{SERVER_URL}/request-work", json={"worker": WORKER_NAME}, timeout=10)
-            data = res.json()
+    if worker in workers:
+        workers[worker]["last_seen"] = time.time()
 
-            if data.get("message") == "Match already found. Stop all workers.":
-                print("[✋] Match already found globally. Exiting.")
-                break
+    with db_lock:
+        with duckdb.connect(DB_FILE) as con:
+            match_count = con.execute("SELECT COUNT(*) FROM work_ranges WHERE status = 'found'").fetchone()[0]
+            if match_count > 0:
+                return jsonify({"message": "Match already found. Stop all workers."})
 
-            if "hex" not in data:
-                print("[~] No work available. Waiting 60s...")
-                time.sleep(60)
-                continue
+            result = con.execute("SELECT id, hex FROM work_ranges WHERE status = 'pending' ORDER BY id ASC LIMIT 1").fetchone()
+            if result:
+                hex_id, hex_value = result
+                con.execute("UPDATE work_ranges SET status = 'in_progress', worker = ? WHERE id = ?", (worker, hex_id))
+                workers[worker]["hex"] = hex_value
 
-            current_hex = data["hex"]
-            print(f"\\n[+] Received work: {current_hex}")
+                total = con.execute("SELECT COUNT(*) FROM work_ranges").fetchone()[0]
+                index = hex_id
 
-            cmd = [
-                VANITYSEARCH_CMD,
-                "-gpuId", "0",
-                "-start", current_hex,
-                "-range", str(RANGE_BITS),
-                TARGET_ADDRESS
-            ]
-            print(f"[+] Running: {' '.join(cmd)}")
-            found = False
+                send_telegram(BOT_A_TOKEN, BOT_A_CHAT_ID, f"🚀 Starting Range {index}/{total}\n{hex_value}\n👷 {worker}")
+                return jsonify({"hex": hex_value, "range_bits": 40})
+            else:
+                return jsonify({"message": "No pending work"}), 200
 
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+# === Heartbeat ===
+@app.route("/heartbeat", methods=["POST"])
+def heartbeat():
+    worker = request.json.get("worker")
+    if worker in workers:
+        workers[worker]["last_seen"] = time.time()
+        return jsonify({"message": "Heartbeat received"})
+    return jsonify({"error": "Unknown worker"}), 400
 
-            for line in proc.stdout:
-                if "Setting starting keys..." in line or ("MK/s" in line and "RUN:" in line):
-                    print(f"\\r{line.strip()} ", end='', flush=True)
-                    continue
-                else:
-                    print(line, end='')
+# === Report result ===
+@app.route("/report-result", methods=["POST"])
+def report_result():
+    worker = request.json.get("worker")
+    status = request.json.get("status")  # 'found' or 'done'
+    hex_value = request.json.get("hex")
 
-                if "Found: 1" in line:
-                    found = True
-                    proc.terminate()
-                    break
+    if not all([worker, status, hex_value]):
+        return jsonify({"error": "Missing fields"}), 400
 
-            proc.wait()
+    if worker not in workers:
+        return jsonify({"error": "Unknown worker"}), 400
 
-            result = "found" if found else "done"
-            requests.post(f"{SERVER_URL}/report-result", json={
-                "worker": WORKER_NAME,
-                "status": result,
-                "hex": current_hex
-            })
-            print(f"\\n[+] Reported result: {result}")
+    workers[worker]["last_seen"] = time.time()
+    print(f"[REPORT] {worker} reported '{status}' for {hex_value}")
 
-            if result == "found":
-                match_found = True
-                break
+    with db_lock:
+        with duckdb.connect(DB_FILE) as con:
+            con.execute("UPDATE work_ranges SET status = ?, worker = ? WHERE hex = ?", (status, worker, hex_value))
+            con.execute("CHECKPOINT;")
 
-            current_hex = None
-            time.sleep(2)
+            index = con.execute("SELECT id FROM work_ranges WHERE hex = ?", (hex_value,)).fetchone()[0]
+            total = con.execute("SELECT COUNT(*) FROM work_ranges").fetchone()[0]
 
-        except Exception as e:
-            print(f"[!] Error during work loop: {e}")
-            time.sleep(15)
+    if status == "found":
+        send_telegram(BOT_A_TOKEN, BOT_A_CHAT_ID, f"✅ MATCH FOUND by {worker}!\n{hex_value}")
+        send_telegram(BOT_B_TOKEN, BOT_B_CHAT_ID, f"🛑 MATCH found — all workers should stop.")
+    else:
+        send_telegram(BOT_A_TOKEN, BOT_A_CHAT_ID, f"❌ Range {index}/{total} finished with no match\n👷 {worker}")
 
-if __name__ == "__main__":
-    try:
-        run_worker()
-    except KeyboardInterrupt:
-        stop_flag = True
-        print("\\n[!] Stopped by user.")
-EOPY
+    return jsonify({"message": "Result recorded"})
 
-# Run the worker inside a screen session and attach
-screen -S Mysession -dm python3 worker.py
-sleep 2
-screen -r Mysession
-EOF
+# === Monitor dead workers ===
+def monitor_workers():
+    print("[Monitor] Started worker monitoring thread")
+    counter = 0
+    while True:
+        now = time.time()
+        to_remove = []
 
-# Execute the script
-chmod +x setup_and_run.sh && ./setup_and_run.sh
+        for worker, info in list(workers.items()):
+            age = now - info["last_seen"]
+            print(f"[Monitor] Checking {worker}: last seen {age:.1f}s ago")
+            if age > heartbeat_timeout:
+                print(f"[Monitor] {worker} timed out (last seen {age:.1f}s ago)")
+                to_remove.append(worker)
+
+        if to_remove:
+            with db_lock:
+                with duckdb.connect(DB_FILE) as con:
+                    for w in to_remove:
+                        con.execute("UPDATE work_ranges SET status = 'pending', worker = NULL WHERE worker = ? AND status = 'in_progress'", (w,))
+                        del workers[w]
+                        send_telegram(BOT_B_TOKEN, BOT_B_CHAT_ID, f"❌ {w} is not responding.\nRemaining: {list(workers.keys())}\nTotal {len(workers)}")
+
+        counter += 1
+        if counter % 18 == 0:  # Every 3 minutes
+            with db_lock:
+                with duckdb.connect(DB_FILE) as con:
+                    con.execute("CHECKPOINT;")
+
+        time.sleep(10)
+
+# Start monitor thread
+threading.Thread(target=monitor_workers, daemon=True).start()
+
+# Health check
+@app.route("/", methods=["GET"])
+def home():
+    return "✅ Server is running", 200
