@@ -69,7 +69,6 @@ def run_worker():
     while not match_found:
         try:
             res = requests.post(f"{SERVER_URL}/request-work", json={"worker": WORKER_NAME}, timeout=10)
-            print(f"[REQUEST-WORK] {res.status_code} {res.text}")
             data = res.json()
 
             if data.get("message") == "Match already found. Stop all workers.":
@@ -98,7 +97,7 @@ def run_worker():
 
             for line in proc.stdout:
                 if "Setting starting keys..." in line or ("MK/s" in line and "RUN:" in line):
-                    print(f"\\r{line.strip()} ", end='', flush=True)
+                    print(f"\r{line.strip()} ", end='', flush=True)
                     continue
                 else:
                     print(line, end='')
