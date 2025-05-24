@@ -49,9 +49,9 @@ def send_heartbeat():
     while not stop_flag and not match_found:
         try:
             res = requests.post(f"{SERVER_URL}/heartbeat", json={"worker": WORKER_NAME}, timeout=10)
-            print(f"[HEARTBEAT] Status: {res.status_code}")
+            print(f"\\r[HEARTBEAT] {res.status_code}", end='', flush=True)
         except Exception as e:
-            print(f"[!] Heartbeat error: {e}")
+            print(f"\\r[!] Heartbeat error: {e}", end='', flush=True)
         time.sleep(HEARTBEAT_INTERVAL)
 
 def run_worker():
@@ -97,14 +97,14 @@ def run_worker():
 
             for line in proc.stdout:
                 if "Found: 1" in line:
-                    print("\n[+] 🎯 MATCH FOUND")
+                    print("\\n[+] 🎯 MATCH FOUND")
                     found = True
                     proc.terminate()
                     break
                 elif "MK/s" in line and "RUN:" in line:
-                    print(f"\r{line.strip()} ", end='', flush=True)
+                    print(f"\\r{line.strip()} ", end='', flush=True)
                 elif "Setting starting keys..." in line:
-                    print(f"\r{line.strip()} ", end='', flush=True)
+                    print(f"\\r{line.strip()} ", end='', flush=True)
                 else:
                     print(line, end='')
 
@@ -117,7 +117,10 @@ def run_worker():
                     "status": result,
                     "hex": current_hex
                 }, timeout=10)
-                print(f"\n[+] Report sent. Status: {resp.status_code}, Body: {resp.text}")
+                if resp.ok:
+                    print(f"\\n[+] Report accepted: {result}")
+                else:
+                    print(f"\\n[!] Report failed: {resp.status_code} {resp.text}")
             except Exception as e:
                 print(f"[!] Failed to send report-result: {e}")
 
@@ -137,7 +140,7 @@ if __name__ == "__main__":
         run_worker()
     except KeyboardInterrupt:
         stop_flag = True
-        print("\n[!] Stopped by user.")
+        print("\\n[!] Stopped by user.")
 EOPY
 
 # Run the worker inside a screen session and attach
