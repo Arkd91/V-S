@@ -96,16 +96,17 @@ def run_worker():
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 
             for line in proc.stdout:
-                if "Setting starting keys..." in line or ("MK/s" in line and "RUN:" in line):
-                    print(f"\r{line.strip()} ", end='', flush=True)
-                    continue
-                else:
-                    print(line, end='')
-
                 if "Found: 1" in line:
+                    print("\n[+] 🎯 MATCH FOUND")
                     found = True
                     proc.terminate()
                     break
+                elif "MK/s" in line and "RUN:" in line:
+                    print(f"\r{line.strip()} ", end='', flush=True)
+                elif "Setting starting keys..." in line:
+                    print(f"\r{line.strip()} ", end='', flush=True)
+                else:
+                    print(line, end='')
 
             proc.wait()
 
@@ -116,7 +117,7 @@ def run_worker():
                     "status": result,
                     "hex": current_hex
                 }, timeout=10)
-                print(f"[+] Report sent. Status: {resp.status_code}, Body: {resp.text}")
+                print(f"\n[+] Report sent. Status: {resp.status_code}, Body: {resp.text}")
             except Exception as e:
                 print(f"[!] Failed to send report-result: {e}")
 
@@ -136,7 +137,7 @@ if __name__ == "__main__":
         run_worker()
     except KeyboardInterrupt:
         stop_flag = True
-        print("\\n[!] Stopped by user.")
+        print("\n[!] Stopped by user.")
 EOPY
 
 # Run the worker inside a screen session and attach
