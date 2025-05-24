@@ -69,7 +69,18 @@ def run_worker():
     while not match_found:
         try:
             res = requests.post(f"{SERVER_URL}/request-work", json={"worker": WORKER_NAME}, timeout=10)
-            data = res.json()
+
+            if res.status_code != 200:
+                print(f"[!] /request-work failed: {res.status_code} {res.text}")
+                time.sleep(10)
+                continue
+
+            try:
+                data = res.json()
+            except Exception as e:
+                print(f"[!] Invalid JSON response: {e} — Content: {res.text}")
+                time.sleep(10)
+                continue
 
             if data.get("message") == "Match already found. Stop all workers.":
                 print("[✋] Match already found globally. Exiting.")
