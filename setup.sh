@@ -104,6 +104,7 @@ def run_worker():
             print(f"[+] Running: {' '.join(cmd)}")
             found = False
 
+            start_time = time.time()
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 
             for line in proc.stdout:
@@ -120,16 +121,18 @@ def run_worker():
                     print(line, end='')
 
             proc.wait()
+            duration = int(time.time() - start_time)
 
             result = "found" if found else "done"
             try:
                 resp = requests.post(f"{SERVER_URL}/report-result", json={
                     "worker": WORKER_NAME,
                     "status": result,
-                    "hex": current_hex
+                    "hex": current_hex,
+                    "duration_seconds": duration
                 }, timeout=10)
                 if resp.ok:
-                    print(f"\\n[+] Report accepted: {result}")
+                    print(f"\\n[+] Report accepted: {result} — {duration} seconds")
                 else:
                     print(f"\\n[!] Report failed: {resp.status_code} {resp.text}")
             except Exception as e:
